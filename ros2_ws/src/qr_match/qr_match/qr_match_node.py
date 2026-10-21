@@ -5,13 +5,19 @@ Subscribes
     <image_topic>   sensor_msgs/Image (or CompressedImage)
 
 Publishes
-    ~/detected   std_msgs/Bool                  any QR present in the frame
-    ~/matched    std_msgs/Bool                  a QR matched the reference
-    ~/result     qr_match_interfaces/QRResult   full per-QR detail
+    ~/detected         std_msgs/Bool                  any QR present in the frame
+    ~/matched          std_msgs/Bool                  a QR matched the reference
+    ~/result           qr_match_interfaces/QRResult   full per-QR detail
+    ~/reference_ready  std_msgs/Bool                  a reference QR is loaded
 
-The reference QR is given once at startup via the ``reference_qr_path``
-parameter. A QR counts as a match when its similarity score is >=
-``match_threshold`` (0.85 by default).
+Services
+    ~/capture_reference  std_srvs/Trigger  use the best QR in the next frame
+                                           as the new reference
+
+The reference QR is either loaded at startup from ``reference_qr_path`` or,
+if that is empty, captured live from the camera via ``~/capture_reference``.
+Until a reference exists nothing can match. A QR counts as a match when its
+similarity score is >= ``match_threshold`` (0.85 by default).
 
 Pipeline (ported from the QR_detection notebook):
     image -> qrdet YOLO detection -> perspective-warp each QR -> threshold
@@ -35,6 +41,7 @@ from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
                        QoSReliabilityPolicy)
 from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Bool
+from std_srvs.srv import Trigger
 
 from qr_match_interfaces.msg import QRDetection, QRResult
 
@@ -217,11 +224,6 @@ class QRMatchNode(Node):
         self.every_n = max(1, int(self.get_parameter("process_every_n").value))
         self.log_every = bool(self.get_parameter("log_every_frame").value)
 
-        if not reference_path:
-            raise RuntimeError(
-                "Parameter 'reference_qr_path' is required, e.g. --ros-args "
-                "-p reference_qr_path:=/path/to/reference_qr.png")
-
         # ---- detector + decoder ----
         # Load weights here rather than in the callback so the first frame
         # doesn't pay the cost.
@@ -238,12 +240,19 @@ class QRMatchNode(Node):
         self.decoder_backend, self.decoder_impl = build_decoder()
         self.get_logger().info(f"QR text decoder: {self.decoder_backend}")
 
-        self.ref_grid, self.ref_text = self._load_reference(reference_path)
-        self.ref_size = int(self.ref_grid.shape[0])
-        self.get_logger().info(
-            f"Reference loaded from {reference_path} "
-            f"({self.ref_size}x{self.ref_size} modules, "
-            f"text={self.ref_text or 'n/a'})")
+        self.ref_grid, self.ref_text, self.ref_size = None, None, None
+        self.capture_pending = False
+        if reference_path:
+            self.ref_grid, self.ref_text = self._load_reference(reference_path)
+            self.ref_size = int(self.ref_grid.shape[0])
+            self.get_logger().info(
+                f"Reference loaded from {reference_path} "
+                f"({self.ref_size}x{self.ref_size} modules, "
+                f"text={self.ref_text or 'n/a'})")
+        else:
+            self.get_logger().info(
+                "No reference_qr_path: call ~/capture_reference to learn one "
+                "from the camera.")
 
         self.bridge = CvBridge()
         self.frame_count = 0
@@ -266,6 +275,9 @@ class QRMatchNode(Node):
         self.pub_detected = self.create_publisher(Bool, "~/detected", result_qos)
         self.pub_matched = self.create_publisher(Bool, "~/matched", result_qos)
         self.pub_result = self.create_publisher(QRResult, "~/result", result_qos)
+        self.pub_ref_ready = self.create_publisher(Bool, "~/reference_ready", result_qos)
+        self.pub_ref_ready.publish(Bool(data=self.ref_grid is not None))
+        self.create_service(Trigger, "~/capture_reference", self.on_capture)
 
         self.get_logger().info(
             f"Ready. Listening on '{image_topic}', threshold {self.threshold:.2f}, "
@@ -311,10 +323,35 @@ class QRMatchNode(Node):
                         float(det.get("confidence", 0.0)), text))
         return out
 
+    # ---- capture a reference from the live camera ----
+    def on_capture(self, _request, response):
+        """Arm a capture: the next frame containing a QR becomes the reference."""
+        self.capture_pending = True
+        self.pub_ref_ready.publish(Bool(data=False))
+        self.pub_matched.publish(Bool(data=False))
+        response.success = True
+        response.message = ("Waiting for a frame with a QR; "
+                            "watch ~/reference_ready.")
+        self.get_logger().info("Reference capture requested.")
+        return response
+
+    def _capture_from_frame(self, frame) -> None:
+        dets = self._detect(frame, grid_size=None)
+        if not dets:
+            return  # keep waiting for a frame that actually has a QR
+        grid, _, conf, text = max(dets, key=lambda d: d[2])
+        self.ref_grid, self.ref_text = grid, text
+        self.ref_size = int(grid.shape[0])
+        self.capture_pending = False
+        self.pub_ref_ready.publish(Bool(data=True))
+        self.get_logger().info(
+            f"Reference captured from camera ({self.ref_size}x{self.ref_size} "
+            f"modules, conf={conf:.2f}, text={text or 'n/a'})")
+
     # ---- image callback ----
     def on_image(self, msg) -> None:
         self.frame_count += 1
-        if self.frame_count % self.every_n != 0:
+        if self.frame_count % self.every_n != 0 and not self.capture_pending:
             return
         try:
             if self.use_compressed:
@@ -325,6 +362,13 @@ class QRMatchNode(Node):
             self.get_logger().error(f"cv_bridge failed: {exc}")
             return
         if frame is None or frame.size == 0:
+            return
+
+        if self.capture_pending:
+            try:
+                self._capture_from_frame(frame)
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(f"Reference capture failed: {exc}")
             return
 
         start = time.perf_counter()
@@ -338,7 +382,9 @@ class QRMatchNode(Node):
         # score each detection
         scored = []
         for grid, bbox, conf, text in dets:
-            if self.trust_text and self.ref_text and text:
+            if self.ref_grid is None:
+                score, from_text = 0.0, False  # no reference yet: nothing matches
+            elif self.trust_text and self.ref_text and text:
                 score = 1.0 if text == self.ref_text else 0.0
                 from_text = True
             else:

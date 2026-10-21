@@ -15,8 +15,10 @@ from launch_ros.actions import Node
 def generate_launch_description():
     args = [
         DeclareLaunchArgument(
-            'reference_qr_path',
-            description='Absolute path to the reference QR image.'),
+            'reference_qr_path', default_value='',
+            description='Absolute path to the reference QR image. Leave empty '
+                        'to capture the reference from the camera via '
+                        '~/capture_reference.'),
         DeclareLaunchArgument(
             'image_topic', default_value='/camera/image_raw',
             description='Input image topic.'),

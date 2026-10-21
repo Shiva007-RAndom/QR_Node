@@ -3,7 +3,7 @@
 <package format="3">
   <name>qr_match_interfaces</name>
   <version>1.0.0</version>
-  <description>Message definitions for QR code detection and reference matching.</description>
+  <description>Message definitions for QR code detection/matching and red-zone detection.</description>
   <maintainer email="you@example.com">you</maintainer>
   <license>Apache-2.0</license>
 
@@ -11,6 +11,7 @@
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>

@@ -29,6 +29,8 @@ grid score.
 | pub | `~/detected` | `std_msgs/Bool` | was any QR found |
 | pub | `~/matched` | `std_msgs/Bool` | did any QR match the reference |
 | pub | `~/result` | `qr_match_interfaces/QRResult` | full per-QR detail |
+| pub | `~/reference_ready` | `std_msgs/Bool` | a reference QR is loaded |
+| srv | `~/capture_reference` | `std_srvs/Trigger` | use the best QR in the next frame as the reference |
 
 The three published topics are latched (`TRANSIENT_LOCAL`), so a subscriber
 that starts late immediately receives the most recent verdict.
@@ -42,7 +44,7 @@ detector confidence, score, matched flag, and decoded text).
 
 | Parameter | Default | Notes |
 |---|---|---|
-| `reference_qr_path` | — | **Required.** Absolute path to the reference QR image. |
+| `reference_qr_path` | `""` | Optional. Absolute path to a reference QR image. If empty, call the `~/capture_reference` service to learn the reference from the camera; until then nothing matches. |
 | `image_topic` | `/camera/image_raw` | Input topic. |
 | `use_compressed` | `false` | Subscribe to `CompressedImage` instead. |
 | `best_effort_qos` | `true` | Most camera drivers publish best-effort. |

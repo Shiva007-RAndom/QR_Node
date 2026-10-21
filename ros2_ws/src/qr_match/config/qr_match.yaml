@@ -1,7 +1,7 @@
 qr_match_node:
   ros__parameters:
-    # --- required ---
     # Absolute path to the reference QR image, loaded once at startup.
+    # Leave "" to capture it from the camera with the ~/capture_reference service.
     reference_qr_path: "/absolute/path/to/reference_qr.png"
 
     # --- input ---
